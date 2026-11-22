@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar: pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to the board</a>
+<header class="top">
+  <p class="kicker">Token launch radar &middot; model radar-2</p>
+  <h1>Which pre-token protocol would be worth the most?</h1>
+  <p class="lede">Every protocol below records no token in the sealed snapshot. Each is ranked by an implied value built from its own figures — TVL, seven-day growth, time running with no token — priced against live-token protocols in its own category. Click any row for its model breakdown and farm plan.</p>
+  <p class="meta" id="meta">Loading the sealed snapshot&hellip;</p>
+</header>
+<main>
+  <section class="controls" aria-label="Board controls">
+    <label>Search <input id="q" type="search" placeholder="Protocol name or slug" autocomplete="off"></label>
+    <label>Category <select id="cat"><option value="">All categories</option></select></label>
+    <label>Chain <select id="chain"><option value="">All chains</option></select></label>
+    <label>Min TVL <select id="minTvl">
+      <option value="0">Any TVL</option>
+      <option value="50000000">$50M and up</option>
+      <option value="100000000">$100M and up</option>
+      <option value="500000000">$500M and up</option>
+    </select></label>
+    <label>Sort <select id="sort">
+      <option value="rank">Rank (implied value)</option>
+      <option value="tvl">TVL, high to low</option>
+      <option value="growth">7-day growth, high to low</option>
+      <option value="age">Age, oldest first</option>
+    </select></label>
+    <label class="check"><input id="watch" type="checkbox"> Watchlist only</label>
+    <span class="views" role="group" aria-label="View">
+      <button id="viewBoard" type="button" class="on" aria-pressed="true">Pre-token board</button>
+      <button id="viewLive" type="button" aria-pressed="false">Live tokens</button>
+    </span>
+  </section>
+  <p class="count" id="count"></p>
+  <section class="detail" id="detail" aria-live="polite">
+    <p class="hint">Select a protocol on the board to see its model breakdown and farm plan.</p>
+  </section>
+  <div class="tablewrap">
+    <table id="board">
+      <thead><tr>
+        <th data-k="rank">Rank</th><th data-k="name">Protocol</th><th data-k="category">Category</th>
+        <th data-k="chains">Chains</th><th data-k="tvl">TVL</th><th data-k="growth">7d</th>
+        <th data-k="age">Age</th><th data-k="implied">Implied value</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <section class="method">
+    <h2>How the value is worked out</h2>
+    <p>Implied value = TVL &times; category multiple &times; growth factor &times; maturity factor &times; chain factor. The category multiple is the median market-cap-per-TVL of live-token protocols in the same category in this snapshot, winsorised to 0.005–2.0 and shrunk toward the market median with eight pseudo-observations, capped at 0.02–0.60. Growth is the seven-day TVL change, clamped to −50%…+100%, weighted 0.35. Maturity rises from 0.70 to 1.00 over three years listed with no token; an unknown listing date counts as 365 days. Each extra chain adds 0.03, up to three.</p>
+    <p>Live-token protocols are shown separately, at the market's own values — never mixed into the ranked board. A protocol is ranked only if it records no token and is not an exchange, a bridge, a liquid-staking or restaking product, a versioned pool, or a wrapped or staked product of a token that already trades. The snapshot records no token; it never proves a protocol has none.</p>
+    <p>Farm plans are built from each protocol's own category, chain, TVL and age. Amounts, gas and hold times are in every step. Never pay to claim an airdrop, and claim only from a link the protocol itself publishes.</p>
+  </section>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
