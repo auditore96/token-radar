@@ -9,7 +9,7 @@
 <body>
 <a class="skip" href="#board">Skip to the board</a>
 <header class="top">
-  <p class="kicker">Token launch radar &middot; model radar-2</p>
+  <p class="kicker">Token launch radar &middot; model radar-3</p>
   <h1>Which pre-token protocol would be worth the most?</h1>
   <p class="lede">Every protocol below records no token in the sealed snapshot. Each is ranked by an implied value built from its own figures — TVL, seven-day growth, time running with no token — priced against live-token protocols in its own category. Click any row for its model breakdown and farm plan.</p>
   <p class="meta" id="meta">Loading the sealed snapshot&hellip;</p>
@@ -53,7 +53,8 @@
   </div>
   <section class="method">
     <h2>How the value is worked out</h2>
-    <p>Implied value = TVL &times; category multiple &times; growth factor &times; maturity factor &times; chain factor. The category multiple is the median market-cap-per-TVL of live-token protocols in the same category in this snapshot, winsorised to 0.005–2.0 and shrunk toward the market median with eight pseudo-observations, capped at 0.02–0.60. Growth is the seven-day TVL change, clamped to −50%…+100%, weighted 0.35. Maturity rises from 0.70 to 1.00 over three years listed with no token; an unknown listing date counts as 365 days. Each extra chain adds 0.03, up to three.</p>
+    <p>Implied value = fitted base from TVL &times; category factor &times; growth factor &times; age factor &times; chain factor. The base comes from a log–log regression fitted on the live-token protocols in this very snapshot: log<sub>10</sub> market cap against log<sub>10</sub> TVL, seven-day growth, log<sub>10</sub> of days listed with no token, and log of chain count. Market cap grows with roughly the square root of TVL, not in proportion to it, so a flat multiple would overvalue the giants. Each category is then corrected by its mean residual from that fit, shrunk toward zero with eight pseudo-observations. The fitted growth and age coefficients are small and negative: a seven-day TVL spike usually marks an inflated TVL, and older protocols with no token yet carry a lower multiple.</p>
+    <p class="fit" id="fitline"></p>
     <p>Live-token protocols are shown separately, at the market's own values — never mixed into the ranked board. A protocol is ranked only if it records no token and is not an exchange, a bridge, a liquid-staking or restaking product, a versioned pool, or a wrapped or staked product of a token that already trades. The snapshot records no token; it never proves a protocol has none.</p>
     <p>Farm plans are built from each protocol's own category, chain, TVL and age. Amounts, gas and hold times are in every step. Never pay to claim an airdrop, and claim only from a link the protocol itself publishes.</p>
   </section>

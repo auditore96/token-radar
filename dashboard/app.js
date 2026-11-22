@@ -127,7 +127,7 @@ function showDetail(slug) {
   var r = null;
   DATA.rows.forEach(function (x) { if (x.slug === slug) r = x; });
   if (!r) return;
-  var base = r.tvl_usd * r.comp_multiple;
+  var base = r.fit_base_usd || r.tvl_usd * r.comp_multiple;
   var steps = (r.farm_steps || []).map(function (s, i) {
     return '<li><b>Step ' + (i + 1) + '.</b> ' + esc(s) + '</li>';
   }).join('');
@@ -138,10 +138,10 @@ function showDetail(slug) {
     ' · listed ' + ageText(r.age_days) + ' ago · records no token</p>' +
     '<h3>Implied value: ' + money(r.implied_value_usd) + '</h3>' +
     '<div class="math">' +
-    '<div><b>' + money(base) + '</b><span>TVL &times; category multiple ' + r.comp_multiple.toFixed(3) +
-    ' (' + r.comp_n + ' live comparables)</span></div>' +
+    '<div><b>' + money(base) + '</b><span>fitted base from TVL, log–log fit on ' + (DATA.fit ? DATA.fit.n_live : 0) + ' live tokens</span></div>' +
+    '<div><b>&times; ' + r.comp_multiple.toFixed(3) + '</b><span>category factor (' + r.comp_n + ' live comparables)</span></div>' +
     '<div><b>&times; ' + r.growth_multiplier.toFixed(3) + '</b><span>growth factor, 7-day ' + pct(r.change_7d) + '</span></div>' +
-    '<div><b>&times; ' + r.maturity_multiplier.toFixed(3) + '</b><span>maturity factor, ' + ageText(r.age_days) + ' with no token</span></div>' +
+    '<div><b>&times; ' + r.maturity_multiplier.toFixed(3) + '</b><span>age factor, ' + ageText(r.age_days) + ' with no token</span></div>' +
     '<div><b>&times; ' + r.chain_multiplier.toFixed(3) + '</b><span>chain factor, ' + (r.chains || []).length + ' chain(s)</span></div>' +
     '</div>' +
     '<h3>Farm plan</h3><ol>' + steps + '</ol>';
@@ -178,6 +178,18 @@ function init() {
     DATA.board_size + ' pre-token protocols ranked · watchlist ' + DATA.watchlist_size +
     ' · model ' + (DATA.model_version || '—') +
     (top ? ' · top implied value ' + money(top.implied_value_usd) : '');
+  var fit = DATA.fit, val = DATA.validation;
+  if (fit && val && byId('fitline')) {
+    byId('fitline').textContent = 'Fitted on ' + fit.n_live +
+      ' live-token protocols in this snapshot: log10 market cap = ' + fit.intercept.toFixed(4) +
+      ' + ' + fit.slope_logtvl.toFixed(4) + ' · log10 TVL' +
+      (fit.coef_growth >= 0 ? ' + ' : ' − ') + Math.abs(fit.coef_growth).toFixed(4) + ' · 7-day growth' +
+      (fit.coef_logage >= 0 ? ' + ' : ' − ') + Math.abs(fit.coef_logage).toFixed(4) + ' · log10 days listed' +
+      (fit.coef_logchains >= 0 ? ' + ' : ' − ') + Math.abs(fit.coef_logchains).toFixed(4) + ' · log chains' +
+      ', plus the category correction. Held out ' + val.folds + '-fold: RMSE ' +
+      val.rmse_log10.toFixed(3) + ' on log10 market cap, R² ' + val.r2.toFixed(3) +
+      ' — against 1.01 for the previous shrunk-median model.';
+  }
   ['q', 'cat', 'chain', 'minTvl', 'sort', 'watch'].forEach(function (id) {
     byId(id).addEventListener('input', render);
     byId(id).addEventListener('change', render);

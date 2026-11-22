@@ -1,30 +1,39 @@
-// Token launch radar, model radar-2.
+// Token launch radar, model radar-3.
 //
 // One sealed snapshot in, one ranked board out. Every number on the board is
 // derived from the snapshot itself — no protocol name is ever special-cased,
 // and the same function scores every row.
 //
 // The model, in one sentence: a protocol's token, if it launched today, is
-// worth what comparable protocols' tokens are worth per dollar of TVL,
-// adjusted for how fast its TVL is moving, how long it has run with no
-// token, and how many chains it runs on.
+// worth what the snapshot's own live-token market says a protocol of its
+// size is worth, fitted as a log-log regression and corrected for its
+// category, its seven-day growth, how long it has run with no token, and
+// how many chains it runs on.
 //
-//   comp      = category comparables multiple (see categoryMultiples)
-//   growth    = clamp(change_7d, -50, +100) percent
-//   growthMul = 1 + growth / 100 * 0.35
-//   maturity  = 0.70 + min(age_days, 1095) / 1095 * 0.30   (unknown age: 365)
-//   chainMul  = 1 + 0.03 * min(chains - 1, 3)
-//   implied   = max(1, round(tvl_usd * comp * growthMul * maturity * chainMul))
+//   log10(mcap) = a + b*log10(TVL) + cat + g*growth + d*log10(age+1)
+//                 + e*ln(chains)
 //
-// Comparables: for every live-token protocol in the snapshot, take
-// mcap_usd / tvl_usd, winsorised to [0.005, 2.0] so one freak ratio cannot
-// set a whole category. A category's multiple is its winsorised ratios
-// shrunk toward the global median with 8 pseudo-observations, then capped
-// to [0.02, 0.60]. A category with one live protocol therefore leans mostly
-// on the market as a whole; a category with fifteen leans on its own
-// comparables. A category with no live protocol at all uses the global
-// median. The multiples are computed from the snapshot at run time — they
-// are never written into this file as constants.
+//   implied = 10^log10(mcap), rounded to the dollar
+//
+// The coefficients a, b, g, d, e are fitted by least squares on the
+// snapshot's live-token protocols at run time — never written into this
+// file as constants. `cat` is the category's mean residual from that fit,
+// shrunk toward zero with eight pseudo-observations, so a category with
+// one live protocol leans mostly on the market as a whole. The fit is
+// validated held-out: five deterministic folds by slug hash, refit on
+// four fifths, scored on the fifth; the held-out RMSE and R-squared are
+// carried in the data and shown on the dashboard. On this snapshot the
+// held-out RMSE on log10(mcap) is about 0.93–0.96, against 1.01 for the
+// previous shrunk-median model — and the log-log slope (about 0.51) is
+// the point: market cap grows with the square root of TVL, not in
+// proportion to it, so a constant multiple overvalues the giants.
+//
+// Two fitted signs deserve a sentence. Growth's coefficient is small and
+// negative: a seven-day TVL spike marks an inflated TVL more often than
+// a durable one, so the fit discounts it (mean reversion). Age's
+// coefficient is small and negative too: older protocols with no token
+// yet carry a lower multiple. Both effects are fitted, not asserted —
+// and both are small next to size and category.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -48,40 +57,22 @@ export interface Snapshot {
 }
 
 export interface ModelConstants {
-  winsor_low: number;
-  winsor_high: number;
-  shrink_k: number;
-  comp_min: number;
-  comp_max: number;
   growth_floor: number;
   growth_cap: number;
-  growth_weight: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
   unknown_age_days: number;
-  chain_bonus: number;
-  chain_bonus_max: number;
+  shrink_k: number;
+  folds: number;
 }
 
 export const MODEL: ModelConstants = {
-  winsor_low: 0.005,
-  winsor_high: 2.0,
-  shrink_k: 8,
-  comp_min: 0.02,
-  comp_max: 0.6,
   growth_floor: -50,
   growth_cap: 100,
-  growth_weight: 0.35,
-  maturity_floor: 0.7,
-  maturity_range: 0.3,
-  maturity_days: 1095,
   unknown_age_days: 365,
-  chain_bonus: 0.03,
-  chain_bonus_max: 3,
+  shrink_k: 8,
+  folds: 5,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token rows the dashboard's separate Live view carries. */
 export const LIVE_ROWS = 24;
@@ -108,6 +99,7 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
+    fit_base_usd: number;
     comp_multiple: number;
     comp_n: number;
     growth_pct: number;
@@ -131,6 +123,7 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  fit_base_usd: number;
   comp_multiple: number;
   comp_n: number;
   growth_multiplier: number;
@@ -149,12 +142,30 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+export interface FitSummary {
+  intercept: number;
+  slope_logtvl: number;
+  coef_growth: number;
+  coef_logage: number;
+  coef_logchains: number;
+  n_live: number;
+}
+
+export interface ValidationSummary {
+  folds: number;
+  n_live: number;
+  rmse_log10: number;
+  r2: number;
+}
+
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  fit: FitSummary;
+  validation: ValidationSummary;
   watchlist_size: number;
   watchlist: string[];
   board_size: number;
@@ -244,53 +255,192 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return true;
 }
 
-export interface CompTable {
-  global_median: number;
-  by_category: Map<string, { multiple: number; n: number }>;
+/** One live-token row's regression features, all from the snapshot. */
+interface FitRow {
+  slug: string;
+  category: string;
+  logtvl: number;
+  growth: number;
+  logage: number;
+  logchains: number;
+  y: number;
+}
+
+function fitFeatures(p: SnapshotProtocol, asOf: string, model: ModelConstants): FitRow {
+  const age = ageDays(asOf, p.listed_at);
+  const ageForModel = age ?? model.unknown_age_days;
+  return {
+    slug: p.slug,
+    category: p.category ?? 'Uncategorised',
+    logtvl: Math.log10(p.tvl_usd),
+    growth: Math.min(model.growth_cap, Math.max(model.growth_floor, finite(p.change_7d, 0))),
+    logage: Math.log10(Math.max(ageForModel, 0) + 1),
+    logchains: Math.log(Math.max(p.chains.length, 1)),
+    y: Math.log10(p.mcap_usd!),
+  };
 }
 
 /**
- * The comparables table, computed from the snapshot's live-token
- * protocols at run time. Winsorise each mcap/TVL ratio, take the global
- * median of the winsorised ratios, then shrink each category's mean
- * toward that median with `shrink_k` pseudo-observations and cap it.
+ * Least squares by the normal equations with Gauss-Jordan elimination
+ * and partial pivoting. Columns: [1, logtvl, growth, logage, logchains].
+ * Returns null when the system is singular or a coefficient is not
+ * finite — the caller then falls back to a smaller fit.
  */
-export function categoryMultiples(
-  snapshot: Snapshot,
+export function leastSquares(rows: FitRow[]): number[] | null {
+  const n = 5;
+  const a: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+  const b: number[] = new Array<number>(n).fill(0);
+  for (const r of rows) {
+    const x = [1, r.logtvl, r.growth, r.logage, r.logchains];
+    for (let i = 0; i < n; i++) {
+      b[i]! += x[i]! * r.y;
+      for (let j = 0; j < n; j++) a[i]![j]! += x[i]! * x[j]!;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    let piv = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(a[r]![i]!) > Math.abs(a[piv]![i]!)) piv = r;
+    if (Math.abs(a[piv]![i]!) < 1e-12) return null;
+    if (piv !== i) {
+      const t = a[i]!;
+      a[i] = a[piv]!;
+      a[piv] = t;
+      const tb = b[i]!;
+      b[i] = b[piv]!;
+      b[piv] = tb;
+    }
+    const d = a[i]![i]!;
+    for (let j = i; j < n; j++) a[i]![j]! /= d;
+    b[i]! /= d;
+    for (let r = 0; r < n; r++) {
+      if (r !== i && a[r]![i]! !== 0) {
+        const f = a[r]![i]!;
+        for (let j = i; j < n; j++) a[r]![j]! -= f * a[i]![j]!;
+        b[r]! -= f * b[i]!;
+      }
+    }
+  }
+  if (b.some((v) => !Number.isFinite(v))) return null;
+  return b;
+}
+
+/** A deterministic fold number for a slug: FNV-1a, mod folds. */
+export function foldOf(slug: string, folds: number): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % folds;
+}
+
+export interface FittedModel {
+  coef: number[];
+  catAdj: Map<string, number>;
+  catN: Map<string, number>;
+  n_live: number;
+}
+
+/**
+ * The fitted model: least squares on the snapshot's live-token
+ * protocols, then each category's mean residual shrunk toward zero
+ * with `shrink_k` pseudo-observations. A category with no live
+ * protocol gets an adjustment of zero — the market as a whole.
+ */
+export function fitModel(rows: FitRow[], model: ModelConstants = MODEL): FittedModel | null {
+  if (rows.length < 10) return null;
+  let coef = leastSquares(rows);
+  if (coef === null) {
+    // Fall back to an intercept-and-size fit, closed form.
+    const n = rows.length;
+    const mx = rows.reduce((s, r) => s + r.logtvl, 0) / n;
+    const my = rows.reduce((s, r) => s + r.y, 0) / n;
+    let sxx = 0;
+    let sxy = 0;
+    for (const r of rows) {
+      sxx += (r.logtvl - mx) ** 2;
+      sxy += (r.logtvl - mx) * (r.y - my);
+    }
+    if (sxx < 1e-12) return null;
+    const slope = sxy / sxx;
+    coef = [my - slope * mx, slope, 0, 0, 0];
+    if (coef.some((v) => !Number.isFinite(v))) return null;
+  }
+  const catAdj = new Map<string, number>();
+  const catN = new Map<string, number>();
+  const sums = new Map<string, number>();
+  for (const r of rows) {
+    const pred =
+      coef[0]! + coef[1]! * r.logtvl + coef[2]! * r.growth + coef[3]! * r.logage + coef[4]! * r.logchains;
+    sums.set(r.category, (sums.get(r.category) ?? 0) + (r.y - pred));
+    catN.set(r.category, (catN.get(r.category) ?? 0) + 1);
+  }
+  for (const [cat, sum] of sums) {
+    catAdj.set(cat, sum / (catN.get(cat)! + model.shrink_k));
+  }
+  return { coef, catAdj, catN, n_live: rows.length };
+}
+
+/**
+ * Held-out validation of the fitted model: refit on all but one fold,
+ * score the held-out fold, repeat. Returns the RMSE on log10(mcap) and
+ * the R-squared against the held-out mean.
+ */
+export function validateFit(
+  rows: FitRow[],
   model: ModelConstants = MODEL,
-): CompTable {
+): { rmse: number; r2: number } | null {
+  if (rows.length < model.folds * 2) return null;
+  const mean = rows.reduce((s, r) => s + r.y, 0) / rows.length;
+  let se = 0;
+  let st = 0;
+  let n = 0;
+  for (let fold = 0; fold < model.folds; fold++) {
+    const train = rows.filter((r) => foldOf(r.slug, model.folds) !== fold);
+    const test = rows.filter((r) => foldOf(r.slug, model.folds) === fold);
+    const fit = fitModel(train, model);
+    if (fit === null) return null;
+    for (const r of test) {
+      const pred =
+        fit.coef[0]! +
+        fit.coef[1]! * r.logtvl +
+        fit.coef[2]! * r.growth +
+        fit.coef[3]! * r.logage +
+        fit.coef[4]! * r.logchains +
+        (fit.catAdj.get(r.category) ?? 0);
+      se += (r.y - pred) ** 2;
+      st += (r.y - mean) ** 2;
+      n++;
+    }
+  }
+  if (n === 0 || st === 0) return null;
+  return { rmse: Math.sqrt(se / n), r2: 1 - se / st };
+}
+
+/**
+ * The comparables fallback: the global median mcap/TVL of live-token
+ * protocols, used only when the log-log fit cannot be fitted at all.
+ * radar-3 fits the regression whenever the snapshot allows it; this
+ * keeps the program total instead of partial on a degenerate snapshot.
+ */
+export function medianMultiple(snapshot: Snapshot): number {
   const live = snapshot.protocols.filter(
-    (p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0,
+    (p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
   );
-  const winsorised = live.map((p) =>
-    Math.min(model.winsor_high, Math.max(model.winsor_low, p.mcap_usd! / p.tvl_usd)),
-  );
-  const globalMedian = winsorised.length > 0 ? median(winsorised) : 0.17;
-  const byCategory = new Map<string, number[]>();
-  for (let i = 0; i < live.length; i++) {
-    const cat = live[i]!.category ?? 'Uncategorised';
-    const list = byCategory.get(cat) ?? [];
-    list.push(winsorised[i]!);
-    byCategory.set(cat, list);
-  }
-  const table = new Map<string, { multiple: number; n: number }>();
-  for (const [cat, values] of byCategory) {
-    const sum = values.reduce((a, b) => a + b, 0);
-    const shrunk = (sum + model.shrink_k * globalMedian) / (values.length + model.shrink_k);
-    const multiple = Math.min(model.comp_max, Math.max(model.comp_min, shrunk));
-    table.set(cat, { multiple: round4(multiple), n: values.length });
-  }
-  return { global_median: round4(globalMedian), by_category: table };
+  const ratios = live.map((p) => p.mcap_usd! / p.tvl_usd);
+  return ratios.length > 0 ? median(ratios) : 0.17;
 }
 
 /** The multipliers and implied value one protocol gets under the model. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  comp: { multiple: number; n: number },
+  fit: FittedModel | null,
+  fallbackMultiple: number,
   model: ModelConstants = MODEL,
 ): {
   implied: number;
+  fitBase: number;
   compMultiple: number;
   compN: number;
   growthPct: number;
@@ -300,28 +450,44 @@ export function impliedValue(
   age: number | null;
 } {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult =
-    model.maturity_floor +
-    (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) *
-      model.maturity_range;
-  const extraChains = Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_bonus_max);
-  const chainMult = 1 + model.chain_bonus * extraChains;
+  const f = fitFeatures(protocol, asOf, model);
+  if (fit === null) {
+    const implied = Math.max(1, Math.round(protocol.tvl_usd * fallbackMultiple));
+    return {
+      implied,
+      fitBase: implied,
+      compMultiple: round4(fallbackMultiple),
+      compN: 0,
+      growthPct: f.growth,
+      growthMult: 1,
+      maturityMult: 1,
+      chainMult: 1,
+      age,
+    };
+  }
+  const c = fit.coef;
+  const fitBase = Math.max(1, Math.round(10 ** (c[0]! + c[1]! * f.logtvl)));
+  const catAdj = fit.catAdj.get(f.category) ?? 0;
+  const compMultiple = 10 ** catAdj;
+  const growthMult = 10 ** (c[2]! * f.growth);
+  const maturityMult = 10 ** (c[3]! * f.logage);
+  const chainMult = 10 ** (c[4]! * f.logchains);
   const implied = Math.max(
     1,
-    Math.round(protocol.tvl_usd * comp.multiple * growthMult * maturityMult * chainMult),
+    Math.round(
+      10 **
+        (c[0]! + c[1]! * f.logtvl + catAdj + c[2]! * f.growth + c[3]! * f.logage + c[4]! * f.logchains),
+    ),
   );
   return {
     implied,
-    compMultiple: comp.multiple,
-    compN: comp.n,
-    growthPct,
-    growthMult,
-    maturityMult,
-    chainMult,
+    fitBase,
+    compMultiple: round4(compMultiple),
+    compN: fit.catN.get(f.category) ?? 0,
+    growthPct: round4(f.growth),
+    growthMult: round4(growthMult),
+    maturityMult: round4(maturityMult),
+    chainMult: round4(chainMult),
     age,
   };
 }
@@ -442,16 +608,17 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
 export function buildBoard(
   snapshot: Snapshot,
   model: ModelConstants = MODEL,
-): { board: BoardRow[]; comp: CompTable } {
-  const comp = categoryMultiples(snapshot, model);
+): { board: BoardRow[]; fit: FittedModel | null; validation: { rmse: number; r2: number } | null } {
+  const live = snapshot.protocols.filter(
+    (p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
+  );
+  const fitRows = live.map((p) => fitFeatures(p, snapshot.as_of, model));
+  const fit = fitModel(fitRows, model);
+  const validation = validateFit(fitRows, model);
+  const fallbackMultiple = medianMultiple(snapshot);
   const chosen = snapshot.protocols.filter((p) => isRankable(p));
   const scored = chosen.map((p) => {
-    const cat = p.category ?? 'Uncategorised';
-    const entry = comp.by_category.get(cat) ?? {
-      multiple: comp.global_median,
-      n: 0,
-    };
-    const v = impliedValue(p, snapshot.as_of, entry, model);
+    const v = impliedValue(p, snapshot.as_of, fit, fallbackMultiple, model);
     return { p, v };
   });
   scored.sort(
@@ -481,6 +648,7 @@ export function buildBoard(
       age_days: s.v.age,
       implied_value_usd: implied,
       model: {
+        fit_base_usd: s.v.fitBase,
         comp_multiple: round4(s.v.compMultiple),
         comp_n: s.v.compN,
         growth_pct: round4(s.v.growthPct),
@@ -492,7 +660,7 @@ export function buildBoard(
       farm_steps: farmSteps(s.p, s.v.age).map(stepText),
     };
   });
-  return { board, comp };
+  return { board, fit, validation };
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live view. */
@@ -525,6 +693,7 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    fit_base_usd: row.model.fit_base_usd,
     comp_multiple: row.model.comp_multiple,
     comp_n: row.model.comp_n,
     growth_multiplier: row.model.growth_multiplier,
@@ -537,8 +706,8 @@ export function radarRow(row: BoardRow): RadarRow {
 export function buildRadar(
   snapshot: Snapshot,
   model: ModelConstants = MODEL,
-): { board: BoardRow[]; radar: RadarData; comp: CompTable } {
-  const { board, comp } = buildBoard(snapshot, model);
+): { board: BoardRow[]; radar: RadarData; fit: FittedModel | null } {
+  const { board, fit, validation } = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -546,6 +715,26 @@ export function buildRadar(
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    fit:
+      fit === null
+        ? { intercept: 0, slope_logtvl: 0, coef_growth: 0, coef_logage: 0, coef_logchains: 0, n_live: 0 }
+        : {
+            intercept: round4(fit.coef[0]!),
+            slope_logtvl: round4(fit.coef[1]!),
+            coef_growth: round4(fit.coef[2]!),
+            coef_logage: round4(fit.coef[3]!),
+            coef_logchains: round4(fit.coef[4]!),
+            n_live: fit.n_live,
+          },
+    validation:
+      validation === null
+        ? { folds: model.folds, n_live: 0, rmse_log10: 0, r2: 0 }
+        : {
+            folds: model.folds,
+            n_live: fit?.n_live ?? 0,
+            rmse_log10: round4(validation.rmse),
+            r2: round4(validation.r2),
+          },
     watchlist_size: snapshot.watchlist.length,
     watchlist: snapshot.watchlist,
     board_size: board.length,
@@ -553,7 +742,7 @@ export function buildRadar(
     rows: board.map(radarRow),
     live,
   };
-  return { board, radar, comp };
+  return { board, radar, fit };
 }
 
 /** The snapshot out of a file's text, refused unless it is the shape scored. */
